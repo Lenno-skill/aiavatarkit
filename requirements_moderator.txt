@@ -1,0 +1,16 @@
+# Zusätzliche Dependencies für VRChat Meeting Moderator Bot
+
+# Vision und Screenshots
+pyautogui>=0.9.54
+
+# Video-Processing (bereits in AIAvatarKit enthalten, aber hier für Vollständigkeit)
+opencv-python>=4.8.0
+
+# Datum-Parsing
+python-dateutil>=2.8.2
+
+# OSC für VRChat (bereits in AIAvatarKit enthalten)
+pythonosc>=1.8.0
+
+# Speaker Diarization (bereits in AIAvatarKit enthalten)
+resemblyzer>=0.1.1

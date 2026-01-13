@@ -1,0 +1,30 @@
+# VRChat Meeting Moderator Bot - Umgebungsvariablen
+# Kopiere diesen Inhalt in eine Datei namens .env im Projektverzeichnis
+
+# OpenAI API Key (ERFORDERLICH)
+# Hole dir einen Key von: https://platform.openai.com/api-keys
+OPENAI_API_KEY=sk-dein-api-key-hier
+
+# OpenAI TTS Konfiguration (für professionelle englische/deutsche Stimmen)
+# Model: "tts-1" für schnellere Antworten, "tts-1-hd" für bessere Qualität
+OPENAI_TTS_MODEL=tts-1-hd
+# Voice: alloy (neutral, professionell), echo (männlich, klar), fable (britisch), 
+#        onyx (tief, männlich), nova (weiblich, freundlich), shimmer (weiblich, sanft)
+OPENAI_TTS_VOICE=alloy
+
+# VRChat Audio-Geräte (ERFORDERLICH)
+# Finde die Indizes mit: python find_and_set_audio_devices.py
+# VRChat_INPUT_DEVICE: Index von "CABLE Output" (Bot hört VRChat)
+VRChat_INPUT_DEVICE=16
+# VRChat_OUTPUT_DEVICE: Index von "CABLE Input" (Bot spricht zu VRChat)
+VRChat_OUTPUT_DEVICE=13
+
+# Vision-Konfiguration
+# Sekunden zwischen automatischen Screenshots
+VISION_INTERVAL=3.0
+# Optional: Screenshot-Bereich (x, y, width, height) - Leer lassen für Vollbild
+# VRChat_WINDOW_REGION=(0, 0, 1920, 1080)
+
+# OSC-Konfiguration für VRChat
+OSC_HOST=127.0.0.1
+OSC_PORT=9000

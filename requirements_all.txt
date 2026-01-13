@@ -1,0 +1,17 @@
+# Alle Dependencies für VRChat Meeting Moderator Bot
+# Diese Datei kombiniert AIAvatarKit Base Requirements + Moderator-spezifische Dependencies
+
+# AIAvatarKit Base Requirements (aus setup.py)
+httpx>=0.27.0
+openai>=1.55.3
+aiofiles>=24.1.0
+numpy>=2.2.3
+PyAudio>=0.2.14
+silero-vad>=6.0.0
+
+# Moderator-spezifische Dependencies
+pyautogui>=0.9.54
+opencv-python>=4.8.0
+python-dateutil>=2.8.2
+pythonosc>=1.8.0
+resemblyzer>=0.1.1
