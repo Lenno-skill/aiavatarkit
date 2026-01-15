@@ -15,3 +15,6 @@ opencv-python>=4.8.0
 python-dateutil>=2.8.2
 pythonosc>=1.8.0
 resemblyzer>=0.1.1
+python-dotenv>=1.0.0
+Pillow>=10.0.0
+pyscreeze>=0.1.28

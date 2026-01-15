@@ -25,6 +25,11 @@ VISION_INTERVAL=3.0
 # Optional: Screenshot-Bereich (x, y, width, height) - Leer lassen für Vollbild
 # VRChat_WINDOW_REGION=(0, 0, 1920, 1080)
 
-# OSC-Konfiguration für VRChat
+# OSC-Konfiguration für VRChat (OPTIONAL - nur für FaceOSC)
 OSC_HOST=127.0.0.1
 OSC_PORT=9000
+
+# Face Controller (OPTIONAL - Bot funktioniert auch ohne!)
+# Setze auf "false" um Face Controller zu deaktivieren (keine Gesichtsausdrücke)
+# Standard: "true" (aktiviert)
+ENABLE_FACE_CONTROLLER=true

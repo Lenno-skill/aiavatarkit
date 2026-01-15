@@ -15,6 +15,21 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 from dateutil.parser import parse as parse_datetime
 
+# Lade .env Datei (MUSS VOR allen anderen Imports sein!)
+try:
+    from dotenv import load_dotenv
+    # Lade .env aus dem Projektverzeichnis
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+        print(f"✓ .env Datei geladen: {env_path}")
+    else:
+        print(f"⚠️ .env Datei nicht gefunden: {env_path}")
+except ImportError:
+    print("⚠️ python-dotenv nicht installiert. Installiere mit: pip install python-dotenv")
+except Exception as e:
+    print(f"⚠️ Fehler beim Laden der .env Datei: {e}")
+
 from aiavatar import AIAvatar
 from aiavatar.face.vrchat import VRChatFaceController
 from aiavatar.animation.vrchat import VRChatAnimationController
@@ -32,7 +47,7 @@ from moderation_tools import (
 # OpenAI TTS für professionelle englische/deutsche Stimmen
 from aiavatar.sts.tts.openai import OpenAISpeechSynthesizer
 
-# Konfiguration
+# Konfiguration (wird aus .env geladen, wenn vorhanden)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
 
 # OpenAI TTS Konfiguration (statt VOICEVOX)
@@ -50,6 +65,10 @@ VRChat_WINDOW_REGION = os.getenv("VRChat_WINDOW_REGION", None)  # Optional: (x, 
 # OSC-Konfiguration für VRChat
 OSC_HOST = os.getenv("OSC_HOST", "127.0.0.1")
 OSC_PORT = int(os.getenv("OSC_PORT", "9000"))
+
+# Face Controller Konfiguration (OPTIONAL)
+# Setze auf "false" oder "0" um Face Controller zu deaktivieren (Bot funktioniert auch ohne)
+ENABLE_FACE_CONTROLLER = os.getenv("ENABLE_FACE_CONTROLLER", "true").lower() in ("true", "1", "yes")
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +280,11 @@ last_screenshot: Optional[bytes] = None
 visual_context: Dict[str, Any] = {}
 last_visual_update_time: float = 0.0
 VISUAL_UPDATE_INTERVAL = 10.0  # Sekunden zwischen visuellen Kontext-Updates
+
+# Globale Variablen für Echo-Unterdrückung
+bot_speaking: bool = False
+last_bot_speech_time: float = 0.0
+ECHO_SUPPRESSION_DURATION = 2.0  # Sekunden nach Bot-Sprache, in denen Audio ignoriert wird
 
 
 async def capture_vrchat_screenshot() -> Optional[bytes]:
@@ -511,15 +535,27 @@ async def continuous_vision_worker(aiavatar_app: AIAvatar, session_id: str):
 
 def setup_speaker_diarization(aiavatar_app: AIAvatar):
     """Richte Speaker Diarization für mehrere Sprecher ein"""
+    global bot_speaking, last_bot_speech_time, ECHO_SUPPRESSION_DURATION
+    
     speaker_gate = MainSpeakerGate(
         accept_threshold=0.55,
         pair_lock_threshold=0.72
     )
     
-    # STT Preprocessing: Sprecher-Erkennung
+    # STT Preprocessing: Sprecher-Erkennung und Echo-Unterdrückung
     @aiavatar_app.sts.stt.preprocess
     async def stt_preprocess(session_id: str, audio_bytes: bytes):
-        # Für Meetings: Alle Sprecher akzeptieren, aber annotieren
+        global bot_speaking, last_bot_speech_time
+        import time
+        
+        current_time = time.time()
+        
+        # Wenn Bot gerade spricht oder kürzlich gesprochen hat, ignoriere Audio (Echo-Unterdrückung)
+        if bot_speaking or (current_time - last_bot_speech_time) < ECHO_SUPPRESSION_DURATION:
+            logger.debug("Ignoriere Audio während/nach Bot-Sprache (Echo-Unterdrückung)")
+            return None, {"ignored": True, "reason": "echo_suppression"}
+        
+        # Für Meetings: Alle Sprecher akzeptieren, aber annotieren sie
         gate_response = await speaker_gate.evaluate(
             session_id, 
             audio_bytes, 
@@ -575,7 +611,19 @@ async def main():
         return
     
     # VRChat Controller erstellen
-    face_controller = create_vrchat_face_controller()
+    # Face Controller ist OPTIONAL - Bot funktioniert auch ohne FaceOSC
+    face_controller = None
+    if ENABLE_FACE_CONTROLLER:
+        try:
+            face_controller = create_vrchat_face_controller()
+            logger.info("Face Controller aktiviert (FaceOSC wird verwendet)")
+        except Exception as e:
+            logger.warning(f"Face Controller konnte nicht initialisiert werden: {e}")
+            logger.info("Bot läuft ohne Face Controller (keine Gesichtsausdrücke)")
+            face_controller = None
+    else:
+        logger.info("Face Controller deaktiviert (Bot läuft ohne Gesichtsausdrücke)")
+    
     animation_controller = create_vrchat_animation_controller()
     
     # System Prompt erstellen
@@ -621,17 +669,34 @@ async def main():
                 return image_to_base64(screenshot_bytes)
         return ""
     
-    # Response Callbacks für automatische visuelle Updates
+    # Response Callbacks für Echo-Unterdrückung
     @aiavatar_app.on_response("start")
     async def on_start_response(response):
         """Callback wenn Response startet"""
-        await aiavatar_app.face_controller.set_face("listening", 3.0)
+        global bot_speaking, last_bot_speech_time
+        import time
+        bot_speaking = True  # Markiere dass Bot spricht
+        last_bot_speech_time = time.time()  # Zeitpunkt speichern
+        if aiavatar_app.face_controller:
+            await aiavatar_app.face_controller.set_face("listening", 3.0)
     
     @aiavatar_app.on_response("chunk")
     async def on_chunk_response(response):
         """Callback für Response-Chunks"""
-        if response.metadata.get("is_first_chunk"):
+        global last_bot_speech_time
+        import time
+        if aiavatar_app.face_controller and response.metadata.get("is_first_chunk"):
             await aiavatar_app.face_controller.set_face("speaking", 0.0)  # Dauer 0 = bis Reset
+        # Aktualisiere Zeitpunkt (Bot spricht noch)
+        last_bot_speech_time = time.time()
+    
+    @aiavatar_app.on_response("final")
+    async def on_final_response(response):
+        """Callback wenn Response beendet ist"""
+        global bot_speaking, last_bot_speech_time
+        import time
+        bot_speaking = False  # Bot spricht nicht mehr
+        last_bot_speech_time = time.time()  # Zeitpunkt für Echo-Unterdrückung
     
     # Meeting-Daten zurücksetzen für neues Meeting
     reset_meeting_data()
@@ -643,16 +708,280 @@ async def main():
         continuous_vision_worker(aiavatar_app, session_id)
     )
     
+    # Prüfe API Key BEVOR Bot gestartet wird
+    if OPENAI_API_KEY == "YOUR_OPENAI_API_KEY" or not OPENAI_API_KEY or len(OPENAI_API_KEY) < 10:
+        logger.error("=" * 60)
+        logger.error("❌ FEHLER: OPENAI_API_KEY nicht gesetzt!")
+        logger.error("=" * 60)
+        logger.error("Bitte setze OPENAI_API_KEY in .env Datei oder als Umgebungsvariable.")
+        logger.error("")
+        logger.error("Option 1: Erstelle .env Datei im Projektverzeichnis:")
+        logger.error("  OPENAI_API_KEY=sk-dein-api-key-hier")
+        logger.error("")
+        logger.error("Option 2: Setze Umgebungsvariable:")
+        logger.error('  $env:OPENAI_API_KEY="sk-dein-api-key-hier"')
+        logger.error("")
+        logger.error("Siehe auch: ENV_SETUP_ANLEITUNG.md")
+        logger.error("=" * 60)
+        return
+    
     logger.info("VRChat Meeting Moderator Bot gestartet")
     logger.info("Warte auf Meeting-Teilnehmer...")
     
+    # Debug: Prüfe Konfiguration
+    logger.info(f"✓ API Key gesetzt: {OPENAI_API_KEY[:10]}...{OPENAI_API_KEY[-4:]}")
+    logger.info(f"✓ Input Device: {VRChat_INPUT_DEVICE}, Output Device: {VRChat_OUTPUT_DEVICE}")
+    
     try:
-        # Bot starten
-        await aiavatar_app.start_listening(session_id=session_id, user_id="moderator")
+        # Bot starten (blockiert bis beendet)
+        logger.info("Starte Bot-Listening (blockiert bis beendet)...")
+        
+        # Prüfe Audio-Geräte vor Start
+        try:
+            logger.info("Prüfe Audio-Geräte...")
+            if hasattr(aiavatar_app, 'audio_recorder'):
+                logger.info(f"Audio Recorder: Device Index {aiavatar_app.audio_recorder.device_index}, Sample Rate {aiavatar_app.audio_recorder.sample_rate}")
+                # Versuche Audio-Stream zu testen
+                try:
+                    import pyaudio
+                    p = pyaudio.PyAudio()
+                    device_info = p.get_device_info_by_index(aiavatar_app.audio_recorder.device_index)
+                    logger.info(f"Audio Input Device Info: {device_info.get('name')}, Max Input Channels: {device_info.get('maxInputChannels')}")
+                    if device_info.get('maxInputChannels', 0) == 0:
+                        logger.error("❌ FEHLER: Audio-Gerät hat keine Input-Kanäle! Das Gerät kann nicht für Audio-Input verwendet werden.")
+                    else:
+                        # Versuche Stream zu öffnen
+                        try:
+                            test_stream = p.open(
+                                rate=aiavatar_app.audio_recorder.sample_rate,
+                                channels=aiavatar_app.audio_recorder.channels,
+                                format=pyaudio.paInt16,
+                                input=True,
+                                frames_per_buffer=aiavatar_app.audio_recorder.chunk_size,
+                                input_device_index=aiavatar_app.audio_recorder.device_index
+                            )
+                            logger.info("✓ Audio-Stream kann geöffnet werden")
+                            test_stream.stop_stream()
+                            test_stream.close()
+                        except OSError as stream_error:
+                            error_code = getattr(stream_error, 'errno', None)
+                            if error_code == -9999:
+                                logger.warning("⚠️ Audio-Gerät kann momentan nicht geöffnet werden (möglicherweise von VRChat verwendet)")
+                                logger.warning("Der Bot wird automatisch versuchen, das Gerät zu öffnen, wenn es verfügbar ist.")
+                            else:
+                                logger.error(f"❌ FEHLER: Audio-Stream kann nicht geöffnet werden: {stream_error}", exc_info=True)
+                        except Exception as stream_error:
+                            logger.error(f"❌ FEHLER: Audio-Stream kann nicht geöffnet werden: {stream_error}", exc_info=True)
+                    p.terminate()
+                except Exception as audio_test_error:
+                    logger.error(f"❌ FEHLER beim Testen des Audio-Geräts: {audio_test_error}", exc_info=True)
+            if hasattr(aiavatar_app, 'audio_player'):
+                logger.info(f"Audio Player: Device Index {aiavatar_app.audio_player.device_index}")
+        except Exception as e:
+            logger.warning(f"Fehler beim Prüfen der Audio-Geräte: {e}")
+        
+        # Wrapper für start_listening mit erweitertem Debugging
+        async def start_listening_with_debug():
+            """Wrapper für start_listening mit erweitertem Debugging"""
+            logger.info("Initialisiere Session...")
+            try:
+                await aiavatar_app.initialize_session(session_id, "moderator", None)
+                logger.info("✓ Session initialisiert")
+            except Exception as e:
+                logger.error(f"❌ Fehler bei Session-Initialisierung: {e}", exc_info=True)
+                raise
+            
+            logger.info("Starte send_microphone_task...")
+            try:
+                # Wrapper für send_microphone_worker mit Error-Handling und Retry-Logik
+                async def send_microphone_worker_with_error_handling(session_id: str):
+                    """Wrapper für send_microphone_worker mit Error-Handling und Retry"""
+                    max_retries = 5
+                    retry_delay = 2.0  # Sekunden
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            logger.info(f"Öffne Audio-Stream... (Versuch {attempt + 1}/{max_retries})")
+                            stream_gen = aiavatar_app.audio_recorder.start_stream()
+                            logger.info("✓ Audio-Stream-Generator erstellt, starte Loop...")
+                            
+                            async for data in stream_gen:
+                                if not aiavatar_app.cancel_echo or not aiavatar_app.audio_player.is_playing:
+                                    await aiavatar_app.send_microphone_data(data, session_id)
+                            
+                            # Wenn wir hier ankommen, wurde der Stream normal beendet
+                            logger.info("Audio-Stream wurde normal beendet")
+                            break
+                            
+                        except OSError as stream_error:
+                            error_code = getattr(stream_error, 'errno', None)
+                            if error_code == -9999:  # Unanticipated host error
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"⚠️ Audio-Gerät kann nicht geöffnet werden (Versuch {attempt + 1}/{max_retries})")
+                                    logger.warning("Mögliche Ursachen:")
+                                    logger.warning("  - VRChat verwendet das Gerät bereits")
+                                    logger.warning("  - Anderes Programm blockiert das Gerät")
+                                    logger.warning(f"  - Warte {retry_delay} Sekunden und versuche es erneut...")
+                                    await asyncio.sleep(retry_delay)
+                                    retry_delay *= 1.5  # Exponentielles Backoff
+                                else:
+                                    logger.error(f"❌ FEHLER: Audio-Gerät kann nach {max_retries} Versuchen nicht geöffnet werden!")
+                                    logger.error("Bitte stelle sicher, dass:")
+                                    logger.error("  1. VRChat das Audio-Gerät nicht verwendet")
+                                    logger.error("  2. Kein anderes Programm das Gerät blockiert")
+                                    logger.error("  3. Das Gerät in den Windows-Audio-Einstellungen verfügbar ist")
+                                    raise
+                            else:
+                                logger.error(f"❌ FEHLER im Audio-Stream: {stream_error}", exc_info=True)
+                                raise
+                        except Exception as stream_error:
+                            logger.error(f"❌ FEHLER im Audio-Stream: {stream_error}", exc_info=True)
+                            logger.error("Audio-Stream wurde beendet. Bot kann nicht weiterlaufen.")
+                            raise
+                
+                aiavatar_app.send_microphone_task = asyncio.create_task(
+                    send_microphone_worker_with_error_handling(session_id)
+                )
+                logger.info("✓ send_microphone_task erstellt")
+            except Exception as e:
+                logger.error(f"❌ Fehler beim Erstellen von send_microphone_task: {e}", exc_info=True)
+                raise
+            
+            logger.info("Starte receive_response_task...")
+            try:
+                aiavatar_app.receive_response_task = asyncio.create_task(
+                    aiavatar_app.receive_response_worker()
+                )
+                logger.info("✓ receive_response_task erstellt")
+            except Exception as e:
+                logger.error(f"❌ Fehler beim Erstellen von receive_response_task: {e}", exc_info=True)
+                raise
+            
+            # Warte kurz und prüfe Tasks
+            await asyncio.sleep(0.2)
+            
+            if aiavatar_app.send_microphone_task.done():
+                logger.error("❌ send_microphone_task wurde sofort beendet!")
+                try:
+                    await aiavatar_app.send_microphone_task
+                except Exception as e:
+                    logger.error(f"❌ Fehler in send_microphone_task: {e}", exc_info=True)
+                    raise
+            else:
+                logger.info("✓ send_microphone_task läuft")
+            
+            if aiavatar_app.receive_response_task.done():
+                logger.error("❌ receive_response_task wurde sofort beendet!")
+                try:
+                    await aiavatar_app.receive_response_task
+                except Exception as e:
+                    logger.error(f"❌ Fehler in receive_response_task: {e}", exc_info=True)
+                    raise
+            else:
+                logger.info("✓ receive_response_task läuft")
+            
+            # Warte auf beide Tasks mit kontinuierlichem Monitoring
+            logger.info("Warte auf Tasks (Bot läuft jetzt)...")
+            
+            async def monitor_tasks_continuously():
+                """Überwache Tasks kontinuierlich und logge Status"""
+                while True:
+                    await asyncio.sleep(1.0)  # Prüfe alle Sekunde
+                    
+                    if aiavatar_app.send_microphone_task.done():
+                        logger.error("❌ send_microphone_task wurde beendet!")
+                        try:
+                            await aiavatar_app.send_microphone_task
+                        except Exception as e:
+                            logger.error(f"❌ Fehler in send_microphone_task: {e}", exc_info=True)
+                        break
+                    
+                    if aiavatar_app.receive_response_task.done():
+                        logger.error("❌ receive_response_task wurde beendet!")
+                        try:
+                            await aiavatar_app.receive_response_task
+                        except Exception as e:
+                            logger.error(f"❌ Fehler in receive_response_task: {e}", exc_info=True)
+                        break
+                    
+                    logger.debug("✓ Beide Tasks laufen noch...")
+            
+            # Starte Monitoring parallel
+            monitor_task = asyncio.create_task(monitor_tasks_continuously())
+            
+            try:
+                results = await asyncio.gather(
+                    aiavatar_app.send_microphone_task,
+                    aiavatar_app.receive_response_task,
+                    return_exceptions=True
+                )
+                
+                # Stoppe Monitoring
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
+                
+                # Prüfe Ergebnisse auf Fehler
+                if isinstance(results[0], Exception):
+                    logger.error(f"❌ Fehler in send_microphone_task: {results[0]}", exc_info=True)
+                    raise results[0]
+                if isinstance(results[1], Exception):
+                    logger.error(f"❌ Fehler in receive_response_task: {results[1]}", exc_info=True)
+                    raise results[1]
+                
+                logger.info("✓ Beide Tasks wurden normal beendet")
+                    
+            except Exception as e:
+                logger.error(f"❌ Fehler in asyncio.gather: {e}", exc_info=True)
+                monitor_task.cancel()
+                raise
+        
+        # Starte Bot mit erweitertem Debugging
+        try:
+            await start_listening_with_debug()
+            logger.info("Bot-Listening beendet")
+        except Exception as start_error:
+            logger.error(f"❌ Fehler beim Starten des Bots: {start_error}", exc_info=True)
+            
+            # Prüfe Tasks auf Fehler
+            if hasattr(aiavatar_app, 'send_microphone_task') and aiavatar_app.send_microphone_task:
+                if aiavatar_app.send_microphone_task.done():
+                    try:
+                        await aiavatar_app.send_microphone_task
+                    except Exception as task_e:
+                        logger.error(f"❌ Fehler in send_microphone_task: {task_e}", exc_info=True)
+            
+            if hasattr(aiavatar_app, 'receive_response_task') and aiavatar_app.receive_response_task:
+                if aiavatar_app.receive_response_task.done():
+                    try:
+                        await aiavatar_app.receive_response_task
+                    except Exception as task_e:
+                        logger.error(f"❌ Fehler in receive_response_task: {task_e}", exc_info=True)
+            
+            raise
     except KeyboardInterrupt:
-        logger.info("Bot wird beendet...")
+        logger.info("Bot wird beendet (KeyboardInterrupt)...")
+    except Exception as e:
+        logger.error(f"Fehler beim Starten des Bots: {e}", exc_info=True)
+        # Prüfe Tasks auf Fehler
+        if hasattr(aiavatar_app, 'send_microphone_task') and aiavatar_app.send_microphone_task:
+            if aiavatar_app.send_microphone_task.done():
+                try:
+                    await aiavatar_app.send_microphone_task
+                except Exception as task_e:
+                    logger.error(f"Fehler in send_microphone_task: {task_e}", exc_info=True)
+        if hasattr(aiavatar_app, 'receive_response_task') and aiavatar_app.receive_response_task:
+            if aiavatar_app.receive_response_task.done():
+                try:
+                    await aiavatar_app.receive_response_task
+                except Exception as task_e:
+                    logger.error(f"Fehler in receive_response_task: {task_e}", exc_info=True)
+        raise
     finally:
         # Vision-Task beenden
+        logger.info("Beende Vision-Task...")
         if vision_task:
             vision_task.cancel()
             try:
